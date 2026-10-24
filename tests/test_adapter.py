@@ -103,7 +103,7 @@ class MediaTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
-    def run_complete(self, answer, tools=None):
+    def run_complete(self, answer, tools=None, recovered_error=False):
         calls = []
 
         def fake_rpc(method, data=None, timeout=30):
@@ -115,7 +115,18 @@ class BridgeTests(unittest.TestCase):
                     "steps": (
                         []
                         if calls.count(method) == 1
-                        else [{"plannerResponse": {"response": answer}}]
+                        else (
+                            [
+                                {
+                                    "type": "CORTEX_STEP_TYPE_VIEW_FILE",
+                                    "status": "CORTEX_STEP_STATUS_ERROR",
+                                    "error": {"shortError": "file does not exist"},
+                                }
+                            ]
+                            if recovered_error
+                            else []
+                        )
+                        + [{"plannerResponse": {"response": answer}}]
                     )
                 }
             if method == "GetAllCascadeTrajectories":
@@ -158,6 +169,11 @@ class BridgeTests(unittest.TestCase):
 
     def test_text_reply_and_session_reuse(self):
         self.assertEqual(self.run_complete("OK")["content"], "OK")
+
+    def test_recoverable_native_tool_error_does_not_abort_reply(self):
+        self.assertEqual(
+            self.run_complete("RECOVERED", recovered_error=True)["content"], "RECOVERED"
+        )
 
     def test_function_call_translation(self):
         tools = [{"type": "function", "function": {"name": "read_file"}}]

@@ -165,7 +165,9 @@ class Bridge:
                     {"cascadeId": cid, "stepOffset": offset},
                 ).get("steps", [])
                 for s in steps:
-                    if "ERROR" in s.get("type", "") or "ERROR" in s.get("status", ""):
+                    # A failed native tool (e.g. a missing optional file) may be
+                    # recovered by the planner. Only a trajectory error is fatal.
+                    if s.get("type") == "CORTEX_STEP_TYPE_ERROR":
                         raise RuntimeError(
                             "Hub generation failed: "
                             + json.dumps(s.get("errorMessage", s.get("error", {})))[
