@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.tools/
+adapter.key
+adapter-settings.json
+*oauth-token*
+*credentials*
+openclaw.json*
+*.log
+*.zip
+.env
+.env.*
+!.env.example
