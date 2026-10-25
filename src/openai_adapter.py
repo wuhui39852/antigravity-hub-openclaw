@@ -2,6 +2,7 @@ import json, time, uuid, secrets, hmac, os, logging
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from antigravity_pro_bridge import Bridge, discover, rpc
+from adapter_protocol import AdapterError, validate_request, reject_constant
 
 ROOT = Path(__file__).parent
 KEY = (ROOT / "adapter.key").read_text().strip()
@@ -22,8 +23,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        if getattr(self, "retry_after", None):
+            self.send_header("Retry-After", str(self.retry_after))
         self.end_headers()
         self.wfile.write(data)
+
+    def send_error_json(self, error):
+        status = error.status if isinstance(error, AdapterError) else 400 if isinstance(error, ValueError) else 502
+        code = error.code if isinstance(error, AdapterError) else "invalid_request_error" if isinstance(error, ValueError) else "upstream_error"
+        if isinstance(error, AdapterError) and error.retry_after:
+            # send_json accepts optional response headers.
+            self.retry_after = error.retry_after
+        self.send_json(status, {"error": {"message": str(error) if isinstance(error, (AdapterError, ValueError)) else "Unexpected adapter failure", "type": code}})
 
     def do_GET(self):
         try:
@@ -51,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             self.send_json(404, {"error": {"message": "Not found"}})
         except Exception as e:
-            self.send_json(503, {"error": {"message": str(e)}})
+            self.send_error_json(e)
 
     def do_POST(self):
         if not self.authorized():
@@ -59,12 +70,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             return self.send_json(404, {"error": {"message": "Not found"}})
         try:
+            started = time.monotonic()
+            request_id = uuid.uuid4().hex
             n = int(self.headers.get("Content-Length", 0))
             if not 0 < n <= 2097152:
                 return self.send_json(
                     413, {"error": {"message": "Invalid request size"}}
                 )
-            d = json.loads(self.rfile.read(n))
+            if self.headers.get("Transfer-Encoding"):
+                raise ValueError("Transfer-Encoding is not supported")
+            d = json.loads(self.rfile.read(n), parse_constant=reject_constant)
+            validate_request(d)
             model = d.get("model", "")
             msg, meta = bridge.complete(
                 model,
@@ -77,7 +93,8 @@ class Handler(BaseHTTPRequestHandler):
             rid = "chatcmpl-" + uuid.uuid4().hex
             created = int(time.time())
             logging.info(
-                "Hub RPC completed model=%s reused=%s cascade=%s",
+                "Hub RPC completed request=%s elapsed=%.3fs model=%s reused=%s cascade=%s",
+                request_id, time.monotonic() - started,
                 model,
                 meta["reused"],
                 meta["cascade"],
@@ -129,10 +146,7 @@ class Handler(BaseHTTPRequestHandler):
             logging.warning("Client disconnected")
         except Exception as e:
             logging.warning("Request failed: %s", e)
-            self.send_json(
-                400 if isinstance(e, (ValueError, KeyError)) else 502,
-                {"error": {"message": str(e), "type": "adapter_error"}},
-            )
+            self.send_error_json(e)
 
 
 if __name__ == "__main__":

@@ -14,9 +14,17 @@
 
 工具调用通过提示协议返回 JSON，再转为 OpenAI `tool_calls`。只接受本轮提供的工具名称。此协议的稳定性取决于模型遵从程度，不是云端强类型工具接口。
 
+调用方工具回复必须含 `content`（字符串或 null）和 `tool_calls` 数组。无效 JSON、未知工具、非法参数或违反 `tool_choice` 均返回 HTTP 502／`tool_protocol_error`，不再降级为普通文本。支持 `auto`、`none`、`required` 和指定函数；这些约束针对调用方工具，Hub 原生工具仍由 `nativeTools` 和项目权限控制。多个工具结果一次回传时，通过最长历史前缀复用 Cascade。
+
+工具参数采用标准库实现的有限 JSON Schema 校验：支持 `type`（单一类型）、`properties`、`required`、`additionalProperties`、`items`、`enum`，允许 `description`、`title`、`default` 注解。未实现的关键字（例如 `$ref`、`anyOf`）会在请求阶段返回 400，避免声称已经校验；调用方应发送此子集内的 schema。
+
 `media_forward.py` 收集原生生成的 inline 图片、产物 URI、文件变更、最终 Markdown 链接和 MEDIA 标记。真实路径必须落在已配置项目或 Hub 产物目录，且文件类型和大小通过检查。附件复制到 OpenClaw media 目录，最终输出 canonical `MEDIA:` 标记。
 
 `openai_adapter.py` 提供 `/health`、`/v1/models`、`/v1/chat/completions`。请求体上限 2 MiB。生成超时来自 `generationTimeout`（默认 180 秒），不是端到端排队 SLA。当前 `CancelCascadeInvocation` 是尽力取消，不能保证取消服务器端任务；超时后应检查 Hub 日志。
+
+生成调用及后续轮询绑定同一 Hub PID，检测到重启返回 503／`hub_restarted`，不自动重放。发送和轮询 RPC 的 socket timeout 受剩余生成预算限制；取消另有最多 3 秒的 socket timeout。超时返回 504／`generation_timeout` 并记录取消是否请求成功。失败后的旧任务在内存中标为 pending；下一轮必须确认它 idle，或确认 Hub PID 已变化，否则返回 503／`hub_task_pending`。这是当前适配器进程内的保护，重启适配器会丢失该记录，不能代替检查 Hub 任务。
+
+请求字段错误返回 400／`invalid_request_error`；锁繁忙返回 503／`adapter_busy` 并带 `Retry-After: 1`；Hub HTTP 429 返回 429／`rate_limited`，不猜测恢复时间；Hub 未登录、权限失败或不可连接返回 503。上游原始 HTTP 错误正文不直接暴露给调用方。日志包含请求 ID、模型、总耗时和会话复用信息。尚未实现自动重试、实时增量流及断连即时取消。
 
 ## 本机文件
 

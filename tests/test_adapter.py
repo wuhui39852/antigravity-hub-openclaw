@@ -106,7 +106,7 @@ class BridgeTests(unittest.TestCase):
     def run_complete(self, answer, tools=None, recovered_error=False):
         calls = []
 
-        def fake_rpc(method, data=None, timeout=30):
+        def fake_rpc(method, data=None, timeout=30, expected_pid=None):
             calls.append(method)
             if method == "StartCascade":
                 return {"cascadeId": "test-cascade"}
@@ -248,6 +248,38 @@ class HTTPTests(unittest.TestCase):
             )
             with urllib.request.urlopen(r) as response:
                 self.assertEqual(json.load(response)["data"][0]["id"], "test")
+
+    def post_error(self, data):
+        request = urllib.request.Request(
+            self.url + "/v1/chat/completions", data=json.dumps(data).encode(),
+            headers={"Authorization": "Bearer unit-test-key", "Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request)
+        with caught.exception as response:
+            return response.code, dict(response.headers), json.load(response)
+
+    def test_invalid_request_is_400_without_generation(self):
+        with patch.object(self.module.bridge, "complete") as complete:
+            status, _, body = self.post_error({"model": "test", "stream": "yes"})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"]["type"], "invalid_request_error")
+        complete.assert_not_called()
+
+    def test_busy_has_retry_after(self):
+        from adapter_protocol import AdapterError
+        with patch.object(self.module.bridge, "complete", side_effect=AdapterError("busy", "adapter_busy", 503, 1)):
+            status, headers, body = self.post_error({"model": "test", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 503)
+        self.assertEqual(headers["Retry-After"], "1")
+        self.assertEqual(body["error"]["type"], "adapter_busy")
+
+    def test_stream_start_error_keeps_http_status(self):
+        from adapter_protocol import AdapterError
+        with patch.object(self.module.bridge, "complete", side_effect=AdapterError("timed out", "generation_timeout", 504)):
+            status, _, body = self.post_error({"model": "test", "stream": True})
+        self.assertEqual(status, 504)
+        self.assertEqual(body["error"]["type"], "generation_timeout")
 
     def test_sse_tool_response(self):
         message = {

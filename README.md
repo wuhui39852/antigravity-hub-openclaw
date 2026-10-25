@@ -28,6 +28,8 @@ flowchart LR
 
 目前 SSE 在生成结束后整体发送，**不是实时逐字流**；只接受文本输入。工具转换基于提示中的 JSON 约定，并非完整的原生 OpenAI 工具协议。usage 返回零值，不代表没有使用云端额度。适配器串行处理生成；同时使用多个聊天端时可能返回 busy。尚未支持所有多模态和图像 blob 引用格式。
 
+工具回复会严格检查 JSON、`tool_choice` 和参数 schema；当前支持的 JSON Schema 子集与 HTTP 错误码见[架构与接口](docs/ARCHITECTURE.md)。Hub 中途重启或生成超时不会自动重放请求；取消后未确认旧任务 idle 时，新请求返回 `hub_task_pending`，应检查 Hub 日志。
+
 ## 环境要求
 
 - Linux、systemd 用户服务、Python **3.8+**，运行时仅使用标准库。

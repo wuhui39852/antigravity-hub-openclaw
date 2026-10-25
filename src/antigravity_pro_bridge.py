@@ -1,4 +1,5 @@
-import json, urllib.request, urllib.error, os
+import json, urllib.request, urllib.error, os, socket
+from adapter_protocol import AdapterError, validate_tools, parse_tool_reply
 from pathlib import Path
 
 
@@ -18,11 +19,13 @@ def discover():
         d = dict(x.split("=", 1) for x in a if x.startswith("--") and "=" in x)
         if "--hub-port" in d and "--csrf_token" in d:
             return d["--hub-port"], d["--csrf_token"], int(p.name)
-    raise RuntimeError("No authenticated local Hub process discovered")
+    raise AdapterError("No authenticated local Hub process discovered", "hub_unavailable", 503)
 
 
-def rpc(method, data=None, timeout=30):
+def rpc(method, data=None, timeout=30, expected_pid=None):
     port, csrf, pid = discover()
+    if expected_pid is not None and pid != expected_pid:
+        raise AdapterError("Hub restarted during generation; request was not replayed", "hub_restarted", 503)
     req = urllib.request.Request(
         "http://127.0.0.1:"
         + port
@@ -35,10 +38,20 @@ def rpc(method, data=None, timeout=30):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
-        raise RuntimeError(str(e.code) + " " + e.read().decode()[:1200])
+        # Do not expose raw upstream bodies (which can contain private data).
+        e.close()
+        if e.code == 429:
+            raise AdapterError("Hub quota or capacity exhausted", "rate_limited", 429) from e
+        if e.code in (401, 403):
+            raise AdapterError("Hub authentication or permission failed", "hub_auth_error", 503) from e
+        raise AdapterError("Hub RPC failed (HTTP %s)" % e.code, "hub_rpc_error") from e
+    except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+        raise AdapterError("Hub connection failed; generation was not replayed", "hub_unavailable", 503) from e
+    except (ValueError, UnicodeError) as e:
+        raise AdapterError("Hub returned an invalid JSON response", "hub_protocol_error") from e
 
 
-import time, threading, hashlib, uuid, re
+import time, threading, hashlib, re
 from media_forward import settings, collect_media
 
 
@@ -47,11 +60,12 @@ class Bridge:
         self.lock = threading.Lock()
         self.sessions = {}
         self.last_reused = False
+        self.pending = None
 
     def models(self):
         u = rpc("GetUserStatus").get("userStatus", {})
         if not u.get("email"):
-            raise RuntimeError("Hub is not logged in")
+            raise AdapterError("Hub is not logged in", "hub_auth_error", 503)
         return [
             m
             for m in u.get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
@@ -59,10 +73,18 @@ class Bridge:
         ]
 
     def normalize(self, messages):
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a nonempty array")
         out = []
         for m in messages:
+            if not isinstance(m, dict) or m.get("role") not in ("system", "developer", "user", "assistant", "tool"):
+                raise ValueError("Each message needs a supported role")
             c = m.get("content", "")
+            if c is not None and not isinstance(c, (str, list)):
+                raise ValueError("message content must be text or text blocks")
             if isinstance(c, list):
+                if any(not isinstance(x, dict) or not isinstance(x.get("text"), str) for x in c):
+                    raise ValueError("Only text content blocks with string text are supported")
                 if any(
                     x.get("type") not in ["text", "input_text", "output_text"]
                     for x in c
@@ -70,6 +92,24 @@ class Bridge:
                 ):
                     raise ValueError("Only text content is currently supported")
                 c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+            if m["role"] == "tool" and (not isinstance(m.get("tool_call_id"), str) or not m["tool_call_id"]):
+                raise ValueError("tool messages need a tool_call_id")
+            if "tool_calls" in m:
+                calls = m["tool_calls"]
+                if m["role"] != "assistant" or not isinstance(calls, list):
+                    raise ValueError("tool_calls must be an assistant array")
+                for tool in calls:
+                    if not isinstance(tool, dict) or not isinstance(tool.get("id"), str) or tool.get("type") != "function" or not isinstance(tool.get("function"), dict):
+                        raise ValueError("Invalid assistant tool call")
+                    fn = tool["function"]
+                    if not isinstance(fn.get("name"), str) or not isinstance(fn.get("arguments"), str):
+                        raise ValueError("Tool name and serialized arguments must be strings")
+                    try:
+                        args = json.loads(fn["arguments"])
+                    except ValueError as exc:
+                        raise ValueError("Invalid assistant tool arguments") from exc
+                    if not isinstance(args, dict):
+                        raise ValueError("Assistant tool arguments must encode an object")
             e = {"role": m.get("role"), "content": c or ""}
             for k in ["tool_calls", "tool_call_id", "name"]:
                 if k in m:
@@ -85,31 +125,54 @@ class Bridge:
         ).hexdigest()
 
     def complete(self, model, messages, tools=None, scope="", tool_choice=None):
-        tools = tools or []
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be a nonempty string")
+        if not isinstance(scope, str):
+            raise ValueError("session scope must be a string")
+        tools, tool_choice = validate_tools(tools, tool_choice)
         messages = self.normalize(messages)
         if not messages:
             raise ValueError("messages must not be empty")
         if not self.lock.acquire(timeout=10):
-            raise RuntimeError("Hub adapter busy; retry later")
+            raise AdapterError("Hub adapter busy; retry later", "adapter_busy", 503, 1)
         cid = None
+        submitted = False
+        completed = False
         try:
+            pid = discover()[2]
+            def call(method, data=None, timeout=30):
+                # Every RPC in this invocation is pinned to the same Hub process.
+                if discover()[2] != pid:
+                    raise AdapterError("Hub restarted during generation; request was not replayed", "hub_restarted", 503)
+                return rpc(method, data, timeout=timeout, expected_pid=pid)
+            if self.pending:
+                old_pid, old_cid = self.pending
+                if old_pid == pid:
+                    state = call("GetAllCascadeTrajectories").get("trajectorySummaries", {}).get(old_cid, {})
+                    if state.get("status") != "CASCADE_RUN_STATUS_IDLE":
+                        raise AdapterError("Previous invocation has not confirmed idle; check Hub before retrying", "hub_task_pending", 503, 1)
+                self.pending = None
             models = {m["modelId"]: m for m in self.models()}
             if model not in models:
                 raise ValueError("Unknown or disabled Hub model: " + model)
             if len(self.sessions) > 128:
                 self.sessions.clear()
-            found = self.sessions.pop(
-                self.key(model, scope, messages[:-1], tools), None
-            )
-            pid = discover()[2]
+            found = None
+            prefix_length = 0
+            # A tool round may append several tool result messages at once.
+            for length in range(len(messages) - 1, 0, -1):
+                candidate = self.sessions.pop(self.key(model, scope, messages[:length], tools), None)
+                if candidate:
+                    found, prefix_length = candidate, length
+                    break
             reused = bool(
                 found and found["pid"] == pid and time.monotonic() - found["at"] < 3600
             )
             if reused:
                 cid = found["cascade"]
-                records = messages[-1:]
+                records = messages[prefix_length:]
             else:
-                cid = rpc(
+                cid = call(
                     "StartCascade",
                     {
                         "source": "CORTEX_TRAJECTORY_SOURCE_SDK",
@@ -119,7 +182,7 @@ class Bridge:
                 )["cascadeId"]
                 records = messages
             offset = len(
-                rpc(
+                call(
                     "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": 0}
                 ).get("steps", [])
             )
@@ -139,7 +202,19 @@ class Bridge:
             instruction += "CONVERSATION_RECORDS=" + json.dumps(
                 records, ensure_ascii=False
             )
-            rpc(
+            timeout = float(settings().get("generationTimeout", 180))
+            if not 0 < timeout < float("inf"):
+                raise AdapterError("Invalid generationTimeout setting", "configuration_error", 503)
+            deadline = time.monotonic() + timeout
+            send_call = call
+            def timed_call(method, data=None):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Generation deadline exceeded")
+                return send_call(method, data, timeout=min(30, remaining))
+            call = timed_call
+            submitted = True
+            call(
                 "SendUserCascadeMessage",
                 {
                     "cascadeId": cid,
@@ -156,11 +231,9 @@ class Bridge:
                     },
                 },
             )
-            timeout = float(settings().get("generationTimeout", 180))
-            deadline = time.monotonic() + timeout
             answer = ""
             while time.monotonic() < deadline:
-                steps = rpc(
+                steps = call(
                     "GetCascadeTrajectorySteps",
                     {"cascadeId": cid, "stepOffset": offset},
                 ).get("steps", [])
@@ -178,61 +251,21 @@ class Bridge:
                     if p.get("response") or p.get("modifiedResponse"):
                         answer = p.get("modifiedResponse") or p["response"]
                 state = (
-                    rpc("GetAllCascadeTrajectories")
+                    call("GetAllCascadeTrajectories")
                     .get("trajectorySummaries", {})
                     .get(cid, {})
                 )
                 if state.get("status") == "CASCADE_RUN_STATUS_IDLE":
+                    completed = True
                     if not answer:
                         raise RuntimeError("Hub returned no assistant text")
                     break
-                time.sleep(0.8)
+                time.sleep(min(0.8, max(0, deadline - time.monotonic())))
             else:
-                try:
-                    rpc("CancelCascadeInvocation", {"cascadeId": cid})
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    "Hub generation timed out after %s seconds" % timeout
-                )
+                raise TimeoutError("Generation deadline exceeded")
             message = {"role": "assistant", "content": answer}
             if tools:
-                text = answer.strip()
-                if text.startswith("```"):
-                    text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text).strip()
-                try:
-                    parsed = json.loads(text)
-                except ValueError:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    message = {"role": "assistant", "content": parsed.get("content")}
-                    calls = parsed.get("tool_calls") or []
-                    if calls:
-                        allowed = {t.get("function", {}).get("name") for t in tools}
-                        normalized = []
-                        for call in calls:
-                            fn = call.get("function", call)
-                            name = fn.get("name")
-                            args = fn.get("arguments", {})
-                            if name not in allowed:
-                                raise RuntimeError("Hub requested an unavailable tool")
-                            if isinstance(args, str):
-                                args = json.loads(args)
-                            if not isinstance(args, dict):
-                                raise RuntimeError("Tool arguments must be an object")
-                            normalized.append(
-                                {
-                                    "id": "call_" + uuid.uuid4().hex[:16],
-                                    "type": "function",
-                                    "function": {
-                                        "name": name,
-                                        "arguments": json.dumps(
-                                            args, ensure_ascii=False
-                                        ),
-                                    },
-                                }
-                            )
-                        message["tool_calls"] = normalized
+                message = parse_tool_reply(answer, tools, tool_choice)
             if not message.get("tool_calls"):
                 outputs = collect_media(steps, message.get("content") or "")
                 if outputs:
@@ -247,5 +280,28 @@ class Bridge:
             ] = {"pid": pid, "cascade": cid, "at": time.monotonic()}
             self.last_reused = reused
             return message, {"cascade": cid, "reused": reused, "hubPid": pid}
+        except Exception as exc:
+            timed_out = isinstance(exc, TimeoutError) or (
+                isinstance(exc, AdapterError) and exc.__cause__ is not None
+                and isinstance(exc.__cause__, (socket.timeout, TimeoutError))
+            )
+            if isinstance(exc.__cause__, urllib.error.URLError):
+                timed_out = timed_out or isinstance(exc.__cause__.reason, (socket.timeout, TimeoutError))
+            if submitted and not completed and cid:
+                self.pending = (pid, cid)
+            if timed_out and submitted and cid:
+                cancelled = False
+                try:
+                    rpc("CancelCascadeInvocation", {"cascadeId": cid}, timeout=3, expected_pid=pid)
+                    cancelled = True
+                except Exception:
+                    pass
+                self.sessions.clear()
+                self.pending = (pid, cid)
+                raise AdapterError(
+                    "Hub generation timed out; cancellation %s; request was not replayed" %
+                    ("requested (completion unconfirmed)" if cancelled else "failed (task may still be running)"),
+                    "generation_timeout", 504) from exc
+            raise
         finally:
             self.lock.release()
