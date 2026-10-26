@@ -3,5 +3,7 @@
   "workspace": "/absolute/path/to/your/project",
   "nativeTools": true,
   "mediaRoot": "/absolute/path/to/openclaw/media/antigravity",
-  "generationTimeout": 180
+  "generationTimeout": 180,
+  "port": 18800,
+  "modelAliases": {}
 }

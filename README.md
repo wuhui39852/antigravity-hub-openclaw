@@ -1,6 +1,6 @@
 # Antigravity Hub → OpenClaw
 
-将本机常驻的 Antigravity Hub 接入 OpenClaw，支持 QQ、Telegram 等通道发送模型输出的图片和附件。支持 Linux ARM64／x86_64，以及旧款 x86 CPU 的 QEMU 用户态兼容运行。
+将本机常驻的 Antigravity Hub 接入 OpenClaw，支持 QQ、Telegram 等通道发送模型输出的图片和附件。支持 macOS（复用已运行的 Hub）、Linux ARM64／x86_64，以及旧款 x86 CPU 的 QEMU 用户态兼容运行。
 
 这是独立的社区实验项目，与 Google、Antigravity、OpenClaw 没有官方隶属关系。不附带任何账号、订阅、OAuth 凭据或官方二进制。请使用自己的账号和有权使用的服务。Google 官方不支持消费者登录的第三方封装，接口和可用性可能变化，详见 [FAQ](https://antigravity.google/docs/faq)。
 
@@ -24,15 +24,15 @@ flowchart LR
 - `/v1/chat/completions`：文本对话、JSON 工具请求转换、会话复用、OpenAI SSE 封装。
 - 原生终端／网页／MCP 等操作由 Hub 项目权限控制；实际能力还取决于本机工具和 MCP 服务是否已安装。
 - 生成图片、附件及引用的本地文件会归档到 OpenClaw 媒体目录，作为 `MEDIA:` 输出交给聊天通道发送。
-- 本机回环地址监听、随机适配器密钥、动态发现 Hub 端口和 CSRF、systemd 用户服务自恢复。
+- 本机回环地址监听、随机适配器密钥、动态发现 Hub 端口和 CSRF、Linux systemd／macOS launchd 用户服务自恢复。
 
-目前 SSE 在生成结束后整体发送，**不是实时逐字流**；只接受文本输入。工具转换基于提示中的 JSON 约定，并非完整的原生 OpenAI 工具协议。usage 返回零值，不代表没有使用云端额度。适配器串行处理生成；同时使用多个聊天端时可能返回 busy。尚未支持所有多模态和图像 blob 引用格式。
+SSE 会立即建立连接并定期发送保活帧，最终答复仍在生成结束后整体发送，**不是实时逐字流**。只接受文本输入。工具转换基于提示中的 JSON 约定，并非完整的原生 OpenAI 工具协议。usage 返回零值，不代表没有使用云端额度。适配器串行处理生成；同时使用多个聊天端时可能返回 busy。尚未支持所有多模态和图像 blob 引用格式。
 
 工具回复会严格检查 JSON、`tool_choice` 和参数 schema；当前支持的 JSON Schema 子集与 HTTP 错误码见[架构与接口](docs/ARCHITECTURE.md)。Hub 中途重启或生成超时不会自动重放请求；取消后未确认旧任务 idle 时，新请求返回 `hub_task_pending`，应检查 Hub 日志。
 
 ## 环境要求
 
-- Linux、systemd 用户服务、Python **3.8+**，运行时仅使用标准库。
+- Linux + systemd 或 macOS + launchd，Python **3.8+**；运行时仅使用标准库。
 - 已安装并可运行的官方 `agy` CLI；已安装且可正常运行的 OpenClaw。
 - 自己的 Antigravity Google 账号及网络连接。
 - QQ／Telegram 凭据仍由 OpenClaw 自己管理，本项目不创建机器人。
@@ -40,6 +40,25 @@ flowchart LR
 本项目基于 agy **1.4.7 / Hub 2.26.0** 实测。OpenClaw 不同版本的会话和命令参数可能变化，参见 [验证记录](docs/VALIDATION.md)。
 
 ## 安装
+
+### macOS
+
+macOS 安装器复用**当前用户已经运行且已登录**的 Antigravity Hub，不复制 OAuth 文件，也不启动第二个 Hub。先确保 Antigravity IDE／CLI 已启动 Hub，并从本项目目录运行：
+
+```bash
+python3 scripts/manage_macos.py install --workspace "$HOME/clawd" --timeout 3600 --port 18800
+python3 scripts/manage_macos.py setup-project --allow-all-tools
+python3 scripts/manage_macos.py smoke-test --model gemini-3.8-flash-high
+python3 scripts/manage_macos.py configure-openclaw --model gemini-3.8-flash-high
+openclaw gateway restart
+python3 scripts/manage_macos.py doctor
+```
+
+如果 18800 已被占用，安装时改用空闲的回环端口（例如 `--port 18801`）；配置命令会读取安装时记录的端口。安装器只创建用户级 launchd 适配器服务，不修改系统网络或代理设置。`--allow-all-tools` 添加项目级 `command(*)`、`read_url(*)`、`execute_url(*)`、`mcp(*)`；这会扩大此项目内代理可执行的操作，**并不是操作系统隔离**。省略参数则不添加这些规则。旧模型名 `antigravity-pro` 保留为本地兼容别名，映射到安装时选择的模型，避免已有会话因模型 ID 失效。
+
+如 Hub 返回额度耗尽，先不要将默认模型切到该 Hub：适配器会返回 429，待账号额度重置后再运行 `smoke-test`。macOS 的适配器可随 launchd 重启，但依赖的 Hub 仍需保持运行。详见[维护与排障](docs/OPERATIONS.md)。
+
+### Linux
 
 先从 [Antigravity 官方文档](https://antigravity.google/docs/getting-started) 安装 CLI。不要从本项目寻找或下载 OAuth 凭据。
 

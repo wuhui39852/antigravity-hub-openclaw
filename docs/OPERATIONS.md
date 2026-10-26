@@ -1,5 +1,7 @@
 # 维护与排障
 
+macOS 使用 `python3 scripts/manage_macos.py doctor`、`python3 scripts/manage_macos.py smoke-test` 和 `launchctl print gui/$(id -u)/ai.antigravity.openai-adapter`。适配器日志位于 `~/.local/share/antigravity-hub-adapter/adapter.log`；Hub 由本机 Antigravity IDE／CLI 维持。macOS 安装器不会改动代理环境变量。若模型返回 `rate_limited`／HTTP 429，说明账号额度不足，不应当靠重启或更改网络解决。等额度重置后再测试并切换默认模型。安装前后的 OpenClaw 配置私有备份为 `~/.openclaw/openclaw.json.before-hub-adapter-*`，不要提交到仓库。
+
 ## 健康检查
 
 在项目目录执行：
@@ -54,7 +56,7 @@ python3 scripts/manage.py smoke-test
 
 Hub 显式重启会通过 PartOf 带动适配器重启，动态端口／CSRF 自动重新发现。Hub 意外崩溃依靠 Restart=always 重启；正在进行的请求仍可能失败，不能保证无感续传。
 
-旧 CPU 模拟运行要观察 `NRestarts`、内存与磁盘 I/O。启动慢时等到 Gateway 端口和通道日志就绪再测试，不要反复强制重启。180 秒上限可以在运行目录的 `adapter-settings.json` 调整，但延长超时不能修复进程崩溃。
+旧 CPU 模拟运行要观察 `NRestarts`、内存与磁盘 I/O。启动慢时等到 Gateway 端口和通道日志就绪再测试，不要反复强制重启。Linux 默认 180 秒、macOS 默认 3600 秒的上限可在运行目录的 `adapter-settings.json` 调整，但延长超时不能修复进程崩溃。
 
 ## 更新和回滚
 

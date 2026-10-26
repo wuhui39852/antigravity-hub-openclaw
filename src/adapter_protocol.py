@@ -17,59 +17,123 @@ class AdapterError(RuntimeError):
 
 
 def validate_schema(value, schema, path="arguments"):
-    """Validate a deliberately small JSON Schema subset; reject other keywords."""
+    """Validate the tool-schema subset used by current OpenClaw functions."""
     if not isinstance(schema, dict):
         raise ValueError("Tool schema must be an object")
-    supported = {"type", "properties", "required", "additionalProperties", "items",
-                 "enum", "description", "title", "default"}
-    if set(schema) - supported:
-        raise ValueError("Unsupported tool schema keywords: " + ", ".join(sorted(set(schema) - supported)))
     kind = schema.get("type")
     types = {"object": dict, "array": list, "string": str, "boolean": bool,
              "integer": int, "number": (int, float), "null": type(None)}
     if kind is not None:
-        if not isinstance(kind, str) or kind not in types:
+        kinds = [kind] if isinstance(kind, str) else kind
+        if not isinstance(kinds, list) or not all(k in types for k in kinds):
             raise ValueError("Unsupported schema type at " + path)
-        if not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool)):
-            raise ValueError(path + " must be " + kind)
+        if not any(isinstance(value, types[k]) and not (k in ("integer", "number") and isinstance(value, bool)) for k in kinds):
+            raise ValueError(path + " must be " + str(kind))
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(path + " is not in enum")
+    if "const" in schema and value != schema["const"]:
+        raise ValueError(path + " does not match const")
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if keyword in schema:
+            successes = 0
+            for child in schema[keyword]:
+                try:
+                    validate_schema(value, child, path)
+                    successes += 1
+                except ValueError:
+                    pass
+            if (keyword == "allOf" and successes != len(schema[keyword])) or (keyword == "anyOf" and successes < 1) or (keyword == "oneOf" and successes != 1):
+                raise ValueError(path + " does not satisfy " + keyword)
+    if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0) or len(value) > schema.get("maxLength", float("inf")):
+            raise ValueError(path + " has invalid length")
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            raise ValueError(path + " does not match pattern")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        for keyword, valid in (
+            ("minimum", lambda n: value >= n), ("maximum", lambda n: value <= n),
+            ("exclusiveMinimum", lambda n: value > n), ("exclusiveMaximum", lambda n: value < n),
+        ):
+            if keyword in schema and not valid(schema[keyword]):
+                raise ValueError(path + " violates " + keyword)
+        if "multipleOf" in schema and value / schema["multipleOf"] % 1 != 0:
+            raise ValueError(path + " violates multipleOf")
     if isinstance(value, dict):
+        if len(value) < schema.get("minProperties", 0) or len(value) > schema.get("maxProperties", float("inf")):
+            raise ValueError(path + " has invalid property count")
         for name in schema.get("required", []):
             if name not in value:
                 raise ValueError(path + "." + name + " is required")
         props = schema.get("properties", {})
+        pattern_props = schema.get("patternProperties", {})
         for name, item in value.items():
             if name in props:
                 validate_schema(item, props[name], path + "." + name)
+            elif any(re.search(pattern, name) for pattern in pattern_props):
+                for pattern, child in pattern_props.items():
+                    if re.search(pattern, name):
+                        validate_schema(item, child, path + "." + name)
             elif schema.get("additionalProperties") is False:
                 raise ValueError(path + "." + name + " is not allowed")
             elif isinstance(schema.get("additionalProperties"), dict):
                 validate_schema(item, schema["additionalProperties"], path + "." + name)
-    if isinstance(value, list) and "items" in schema:
-        for item in value:
-            validate_schema(item, schema["items"], path + "[]")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0) or len(value) > schema.get("maxItems", float("inf")):
+            raise ValueError(path + " has invalid item count")
+        if schema.get("uniqueItems") and len({json.dumps(x, sort_keys=True) for x in value}) != len(value):
+            raise ValueError(path + " requires unique items")
+        if "items" in schema:
+            for item in value:
+                validate_schema(item, schema["items"], path + "[]")
 
 
 def check_schema(schema):
     # Check definitions even when no argument of that type has been supplied yet.
     if not isinstance(schema, dict):
         raise ValueError("Tool schema must be an object")
+    supported = {"type", "properties", "patternProperties", "required", "additionalProperties", "items", "enum",
+                 "description", "title", "default", "const", "format", "examples", "deprecated",
+                 "minLength", "maxLength", "pattern", "minimum", "maximum", "exclusiveMinimum",
+                 "exclusiveMaximum", "multipleOf", "minItems", "maxItems", "uniqueItems",
+                 "minProperties", "maxProperties", "allOf", "anyOf", "oneOf"}
+    if set(schema) - supported:
+        raise ValueError("Unsupported tool schema keywords: " + ", ".join(sorted(set(schema) - supported)))
     kind = schema.get("type", "object")
-    samples = {"object": {}, "array": [], "string": "", "integer": 0,
-               "number": 0, "boolean": False, "null": None}
-    if not isinstance(kind, str) or kind not in samples:
+    kinds = [kind] if isinstance(kind, str) else kind
+    if not isinstance(kinds, list) or not kinds or any(k not in ("object", "array", "string", "integer", "number", "boolean", "null") for k in kinds):
         raise ValueError("Unsupported tool schema type")
-    definition = dict(schema)
-    definition.pop("required", None)
-    definition.pop("enum", None)
-    validate_schema(samples[kind], definition)
     props = schema.get("properties", {})
+    pattern_props = schema.get("patternProperties", {})
     required = schema.get("required", [])
     if not isinstance(props, dict) or not isinstance(required, list) or any(not isinstance(n, str) for n in required):
         raise ValueError("Invalid schema properties or required")
+    if not isinstance(pattern_props, dict):
+        raise ValueError("Invalid patternProperties")
+    for pattern, child in pattern_props.items():
+        re.compile(pattern)
+        check_schema(child)
     if "enum" in schema and not isinstance(schema["enum"], list):
         raise ValueError("Schema enum must be an array")
+    for keyword in ("minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"):
+        if keyword in schema and (not isinstance(schema[keyword], int) or schema[keyword] < 0):
+            raise ValueError("Invalid " + keyword)
+    for keyword in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+        if keyword in schema and (not isinstance(schema[keyword], (int, float)) or isinstance(schema[keyword], bool)):
+            raise ValueError("Invalid " + keyword)
+    if schema.get("multipleOf", 1) == 0:
+        raise ValueError("multipleOf cannot be zero")
+    if "pattern" in schema:
+        if not isinstance(schema["pattern"], str):
+            raise ValueError("Invalid pattern")
+        re.compile(schema["pattern"])
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        raise ValueError("Invalid uniqueItems")
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if keyword in schema:
+            if not isinstance(schema[keyword], list) or not schema[keyword]:
+                raise ValueError("Invalid " + keyword)
+            for child in schema[keyword]:
+                check_schema(child)
     for child in props.values():
         check_schema(child)
     for keyword in ("items", "additionalProperties"):
@@ -122,6 +186,10 @@ def validate_request(data):
 
 def parse_tool_reply(answer, tools, choice):
     text = answer.strip()
+    if not text.startswith(("{", "[", "```")):
+        if choice == "required" or isinstance(choice, dict):
+            raise AdapterError("Tool choice requires a tool call", "tool_protocol_error")
+        return {"role": "assistant", "content": text}
     if text.startswith("```"):
         text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text).strip()
     try:

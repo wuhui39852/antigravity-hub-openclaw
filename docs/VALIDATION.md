@@ -1,6 +1,14 @@
 # 设备验证记录
 
-日期：2026-10-25。为公开分享，本页省略设备 IP、登录账号、Google 身份、聊天标识和所有密钥。
+日期：2026-10-26。为公开分享，本页省略设备 IP、登录账号、Google 身份、聊天标识和所有密钥。
+
+## macOS 工作站
+
+- macOS 用户级 launchd 适配器与已运行的 Hub 集成，动态发现 Hub 端口与 CSRF，项目级终端／网页／MCP 许可已通过 Hub `ReadProject` 核对。
+- 实际占用 18800 的其他进程未被中断；安装器改用可配置的 18801，OpenClaw provider 指向该端口。
+- `gemini-3.8-flash-high` 当前模型额度耗尽，轨迹错误正确映射为 HTTP 429；`gpt-oss-120b-medium` 的真实 Hub `HUB_OK` 回复通过。
+- OpenClaw 新会话以 `antigravity/gpt-oss-120b-medium` 返回 `HUB_OK`，运行元数据确认实际 provider／model。OpenClaw 的模型白名单和工具 schema 兼容问题已修复。
+- OpenClaw 新会话生成测试 TXT，返回正文及 `mediaUrls` 中的归档路径。尚未验证聊天平台向最终用户投递，也未验证长期负载或图片输入。
 
 ## ARM64 小主机（R5S）
 
@@ -32,4 +40,4 @@
 
 部署后运行 `manage.py smoke-test` 检查真实 HTTP 推理。进一步验证应通过自己的 OpenClaw 聊天端完成；每个用户需使用自己的 Google 账号、平台机器人和合法可用的网络环境。
 
-加入原生工具错误恢复回归测试后共有 16 项，GitHub Actions 的 Linux Python 3.10 和 3.12 矩阵全部通过。Windows 本机执行时，符号链接测试因权限限制跳过，其余 15 项通过。离线测试不代替云端、账号或机器人投递验证。
+截至本次 macOS 适配，本地共有 33 项单元测试通过；GitHub Actions 的跨平台结果以最新运行记录为准。离线测试不代替云端、账号或机器人投递验证。

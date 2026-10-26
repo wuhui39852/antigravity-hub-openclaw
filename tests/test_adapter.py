@@ -274,12 +274,41 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(headers["Retry-After"], "1")
         self.assertEqual(body["error"]["type"], "adapter_busy")
 
-    def test_stream_start_error_keeps_http_status(self):
+    def test_stream_error_is_visible_after_headers(self):
         from adapter_protocol import AdapterError
         with patch.object(self.module.bridge, "complete", side_effect=AdapterError("timed out", "generation_timeout", 504)):
-            status, _, body = self.post_error({"model": "test", "stream": True})
-        self.assertEqual(status, 504)
-        self.assertEqual(body["error"]["type"], "generation_timeout")
+            request = urllib.request.Request(
+                self.url + "/v1/chat/completions",
+                data=json.dumps({"model": "test", "stream": True}).encode(),
+                headers={"Authorization": "Bearer unit-test-key", "Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(request) as response:
+                body = response.read().decode()
+                self.assertEqual(response.status, 200)
+        self.assertIn("Antigravity 请求失败：timed out", body)
+        self.assertIn("data: [DONE]", body)
+
+    def test_stream_starts_immediately_and_keeps_connection_alive(self):
+        import time
+        def slow_complete(*_args):
+            time.sleep(0.06)
+            return ({"role": "assistant", "content": "finished"}, {"reused": False, "cascade": "test"})
+        request = urllib.request.Request(
+            self.url + "/v1/chat/completions",
+            data=json.dumps({"model": "test", "stream": True}).encode(),
+            headers={"Authorization": "Bearer unit-test-key", "Content-Type": "application/json"},
+        )
+        with patch.object(self.module, "KEEPALIVE_SECONDS", 0.01), patch.object(
+            self.module.bridge, "complete", side_effect=slow_complete
+        ):
+            with urllib.request.urlopen(request) as response:
+                first = response.readline()
+                blank = response.readline()
+                keepalive = response.readline()
+                self.assertIn('"role": "assistant"', first.decode())
+                self.assertEqual(blank, b"\n")
+                self.assertEqual(keepalive, b": keep-alive\n")
+                self.assertIn("finished", response.read().decode())
 
     def test_sse_tool_response(self):
         message = {

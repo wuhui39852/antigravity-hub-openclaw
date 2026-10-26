@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from adapter_protocol import AdapterError, validate_tools, validate_request, parse_tool_reply
+from adapter_protocol import AdapterError, validate_tools, validate_request, parse_tool_reply, validate_schema
 import antigravity_pro_bridge as bridge
 
 TOOLS = [{"type": "function", "function": {"name": "read", "parameters": {
@@ -14,7 +14,29 @@ TOOLS = [{"type": "function", "function": {"name": "read", "parameters": {
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_common_openclaw_schema_constraints(self):
+        schema = {"type": "object", "properties": {
+            "query": {"type": "string", "maxLength": 4},
+            "limit": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        }, "required": ["query"], "additionalProperties": False}
+        validate_tools([{"type": "function", "function": {"name": "search", "parameters": schema}}], None)
+        validate_schema({"query": "test", "limit": None}, schema)
+        with self.assertRaises(ValueError):
+            validate_schema({"query": "too-long"}, schema)
+
+    def test_pattern_properties(self):
+        schema = {"type": "object", "patternProperties": {"^x-": {"type": "integer"}},
+                  "additionalProperties": False}
+        validate_tools([{"type": "function", "function": {"name": "dynamic", "parameters": schema}}], None)
+        validate_schema({"x-count": 2}, schema)
+        with self.assertRaises(ValueError):
+            validate_schema({"other": 2}, schema)
+
     def test_tool_choices(self):
+        self.assertEqual(parse_tool_reply("完成\nMEDIA:/tmp/result.txt", TOOLS, "auto")["content"],
+                         "完成\nMEDIA:/tmp/result.txt")
+        with self.assertRaises(AdapterError):
+            parse_tool_reply("plain text", TOOLS, "required")
         call = json.dumps({"content": None, "tool_calls": [{"name": "read", "arguments": {"path": "x"}}]})
         for choice in ("auto", "required", {"type": "function", "function": {"name": "read"}}):
             self.assertEqual(parse_tool_reply(call, TOOLS, choice)["tool_calls"][0]["function"]["name"], "read")
@@ -28,7 +50,7 @@ class ProtocolTests(unittest.TestCase):
         for args in ({}, {"path": 1}, {"path": "x", "extra": True}):
             with self.assertRaises(AdapterError):
                 parse_tool_reply(json.dumps({"content": None, "tool_calls": [{"name": "read", "arguments": args}]}), TOOLS, "auto")
-        for text in ("not json", "[]", "{}", '{"content":3,"tool_calls":[]}', '{"content":null,"tool_calls":[null]}'):
+        for text in ("{not json", "[]", "{}", '{"content":3,"tool_calls":[]}', '{"content":null,"tool_calls":[null]}'):
             with self.assertRaises(AdapterError):
                 parse_tool_reply(text, TOOLS, "auto")
 
@@ -54,6 +76,9 @@ class LifecycleTests(unittest.TestCase):
         self.timeout = False
         self.restart = False
         self.answer = "ok"
+        self.error = None
+        self.error_after_empty = False
+        self.step_reads = 0
         self.b = bridge.Bridge()
         self.patches = [
             patch.object(bridge, "discover", side_effect=lambda: ("1", "csrf", self.pid)),
@@ -81,6 +106,12 @@ class LifecycleTests(unittest.TestCase):
         if method == "CancelCascadeInvocation" and self.fail_cancel:
             raise RuntimeError("cancel failed")
         if method == "GetCascadeTrajectorySteps":
+            self.step_reads += 1
+            if self.error_after_empty and self.step_reads == 2:
+                return {"steps": []}
+            if self.error:
+                return {"steps": [{"type": "CORTEX_STEP_TYPE_ERROR_MESSAGE",
+                                   "errorMessage": {"error": {"userErrorMessage": self.error}}}]}
             return {"steps": [{"plannerResponse": {"response": self.answer}}] if self.sent else []}
         if method == "GetAllCascadeTrajectories":
             return {"trajectorySummaries": {"c": {"status": "CASCADE_RUN_STATUS_IDLE" if self.idle else "RUNNING"}}}
@@ -134,6 +165,20 @@ class LifecycleTests(unittest.TestCase):
         sent = [data for method, data, _ in self.calls if method == "SendUserCascadeMessage"]
         records = json.loads(sent[-1]["items"][0]["text"].split("CONVERSATION_RECORDS=")[1])
         self.assertEqual(records, results)
+
+    def test_quota_error_is_reported_as_rate_limit(self):
+        self.error = "RESOURCE_EXHAUSTED: Individual quota reached"
+        with self.assertRaises(AdapterError) as caught:
+            self.complete()
+        self.assertEqual(caught.exception.status, 429)
+        self.assertEqual(caught.exception.code, "rate_limited")
+
+    def test_idle_before_error_step_is_not_empty_success(self):
+        self.error = "Individual quota reached"
+        self.error_after_empty = True
+        with self.assertRaises(AdapterError) as caught:
+            self.complete()
+        self.assertEqual(caught.exception.status, 429)
 
 
 if __name__ == "__main__":

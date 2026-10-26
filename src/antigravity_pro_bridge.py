@@ -1,9 +1,23 @@
-import json, urllib.request, urllib.error, os, socket
+import json, urllib.request, urllib.error, os, socket, re, subprocess, sys
 from adapter_protocol import AdapterError, validate_tools, parse_tool_reply
 from pathlib import Path
 
 
 def discover():
+    if sys.platform == "darwin":
+        output = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
+        for line in output.splitlines():
+            match = re.match(r"\s*(\d+)\s+(.+)", line)
+            if not match:
+                continue
+            command = match.group(2)
+            if not re.search(r"(?:^|/)agy\s+--hub(?:\s|$)", command):
+                continue
+            port = re.search(r"--hub-port=(\d+)", command)
+            token = re.search(r"--csrf_token=([A-Za-z0-9_-]+)", command)
+            if port and token:
+                return port.group(1), token.group(1), int(match.group(1))
+        raise AdapterError("No authenticated local Hub process discovered", "hub_unavailable", 503)
     for p in Path("/proc").iterdir():
         try:
             if p.stat().st_uid != os.getuid():
@@ -127,6 +141,7 @@ class Bridge:
     def complete(self, model, messages, tools=None, scope="", tool_choice=None):
         if not isinstance(model, str) or not model:
             raise ValueError("model must be a nonempty string")
+        model = settings().get("modelAliases", {}).get(model, model)
         if not isinstance(scope, str):
             raise ValueError("session scope must be a string")
         tools, tool_choice = validate_tools(tools, tool_choice)
@@ -232,21 +247,23 @@ class Bridge:
                 },
             )
             answer = ""
+            all_steps = []
+            idle_without_answer_at = None
             while time.monotonic() < deadline:
                 steps = call(
                     "GetCascadeTrajectorySteps",
                     {"cascadeId": cid, "stepOffset": offset},
                 ).get("steps", [])
+                all_steps = steps
                 for s in steps:
                     # A failed native tool (e.g. a missing optional file) may be
                     # recovered by the planner. Only a trajectory error is fatal.
-                    if s.get("type") == "CORTEX_STEP_TYPE_ERROR":
-                        raise RuntimeError(
-                            "Hub generation failed: "
-                            + json.dumps(s.get("errorMessage", s.get("error", {})))[
-                                :500
-                            ]
-                        )
+                    if s.get("type") in ("CORTEX_STEP_TYPE_ERROR", "CORTEX_STEP_TYPE_ERROR_MESSAGE"):
+                        error = s.get("errorMessage", {}).get("error", {})
+                        detail = str(error.get("userErrorMessage", ""))
+                        if "RESOURCE_EXHAUSTED" in detail or "quota reached" in detail.lower():
+                            raise AdapterError("Antigravity account quota exhausted", "rate_limited", 429)
+                        raise AdapterError("Hub generation failed", "hub_generation_error", 502)
                     p = s.get("plannerResponse", {})
                     if p.get("response") or p.get("modifiedResponse"):
                         answer = p.get("modifiedResponse") or p["response"]
@@ -256,10 +273,15 @@ class Bridge:
                     .get(cid, {})
                 )
                 if state.get("status") == "CASCADE_RUN_STATUS_IDLE":
-                    completed = True
-                    if not answer:
-                        raise RuntimeError("Hub returned no assistant text")
-                    break
+                    if answer:
+                        completed = True
+                        break
+                    if idle_without_answer_at is None:
+                        idle_without_answer_at = time.monotonic()
+                    elif time.monotonic() - idle_without_answer_at >= 3:
+                        raise AdapterError("Hub returned no assistant text", "hub_empty_response", 502)
+                else:
+                    idle_without_answer_at = None
                 time.sleep(min(0.8, max(0, deadline - time.monotonic())))
             else:
                 raise TimeoutError("Generation deadline exceeded")
@@ -267,7 +289,7 @@ class Bridge:
             if tools:
                 message = parse_tool_reply(answer, tools, tool_choice)
             if not message.get("tool_calls"):
-                outputs = collect_media(steps, message.get("content") or "")
+                outputs = collect_media(all_steps, message.get("content") or "")
                 if outputs:
                     content = message.get("content") or ""
                     content = re.sub(r"(?m)^MEDIA:.*$", "", content).strip()
