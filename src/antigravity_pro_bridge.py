@@ -249,6 +249,7 @@ class Bridge:
             answer = ""
             all_steps = []
             idle_without_answer_at = None
+            last_error = None
             while time.monotonic() < deadline:
                 steps = call(
                     "GetCascadeTrajectorySteps",
@@ -256,14 +257,14 @@ class Bridge:
                 ).get("steps", [])
                 all_steps = steps
                 for s in steps:
-                    # A failed native tool (e.g. a missing optional file) may be
-                    # recovered by the planner. Only a trajectory error is fatal.
+                    # A failed native tool or transient API error (e.g. attempt 1 connection reset)
+                    # may be recovered by the planner. Only a terminal failure without answer is fatal.
                     if s.get("type") in ("CORTEX_STEP_TYPE_ERROR", "CORTEX_STEP_TYPE_ERROR_MESSAGE"):
                         error = s.get("errorMessage", {}).get("error", {})
-                        detail = str(error.get("userErrorMessage", ""))
+                        detail = str(error.get("shortError") or error.get("userErrorMessage", ""))
                         if "RESOURCE_EXHAUSTED" in detail or "quota reached" in detail.lower():
                             raise AdapterError("Antigravity account quota exhausted", "rate_limited", 429)
-                        raise AdapterError("Hub generation failed", "hub_generation_error", 502)
+                        last_error = detail or "Hub generation failed"
                     p = s.get("plannerResponse", {})
                     if p.get("response") or p.get("modifiedResponse"):
                         answer = p.get("modifiedResponse") or p["response"]
@@ -279,6 +280,8 @@ class Bridge:
                     if idle_without_answer_at is None:
                         idle_without_answer_at = time.monotonic()
                     elif time.monotonic() - idle_without_answer_at >= 3:
+                        if last_error:
+                            raise AdapterError(f"Hub generation failed: {last_error}", "hub_generation_error", 502)
                         raise AdapterError("Hub returned no assistant text", "hub_empty_response", 502)
                 else:
                     idle_without_answer_at = None

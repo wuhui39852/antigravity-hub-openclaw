@@ -50,7 +50,16 @@ def bridge():
     return antigravity_pro_bridge
 
 
+def adapter_url(path=""):
+    config = RUNTIME / "adapter-settings.json"
+    cfg = json.loads(config.read_text()) if config.exists() else {}
+    return "http://127.0.0.1:" + str(cfg.get("port", 18800)) + path
+
+
 def install(args):
+    port = getattr(args, "port", 18800)
+    if not 1 <= port <= 65535:
+        raise ValueError("Invalid adapter port")
     workspace = Path(args.workspace).expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     binary = Path(args.agy).expanduser().resolve()
@@ -73,6 +82,7 @@ def install(args):
     save(
         settings,
         dict(
+            port=port,
             projectId=args.project,
             workspace=str(workspace),
             nativeTools=True,
@@ -102,13 +112,14 @@ def install(args):
         "[Unit]\nDescription=Antigravity OpenAI Adapter\nRequires=agy-hub.service\n"
         "After=agy-hub.service\nPartOf=agy-hub.service\n[Service]\nType=simple\n"
     )
-    adapter += "WorkingDirectory=" + unit_quote(RUNTIME) + "\n"
+    adapter += "WorkingDirectory=" + str(RUNTIME).replace("%", "%%") + "\n"
     adapter += (
         "ExecStart=/usr/bin/python3 " + unit_quote(RUNTIME / "openai_adapter.py") + "\n"
     )
     adapter += (
         "ExecStartPost=/usr/bin/python3 " + unit_quote(RUNTIME / "wait_ready.py") + "\n"
     )
+    adapter += "Environment=ADAPTER_PORT=" + str(port) + "\n"
     adapter += "Restart=on-failure\nRestartSec=5\nUMask=0077\n[Install]\nWantedBy=default.target\n"
     UNITS.mkdir(parents=True, exist_ok=True)
     for name, content in [
@@ -201,7 +212,7 @@ def configure_openclaw(args):
         for m in models
     ]
     config.setdefault("models", {}).setdefault("providers", {})["antigravity"] = {
-        "baseUrl": "http://127.0.0.1:18800/v1",
+        "baseUrl": adapter_url("/v1"),
         "api": "openai-completions",
         "apiKey": (RUNTIME / "adapter.key").read_text().strip(),
         "models": catalog,
@@ -235,7 +246,7 @@ def doctor(args):
     print("Models:", ", ".join(m["modelId"] for m in b.Bridge().models()))
     print(
         "Adapter:",
-        json.load(urllib.request.urlopen("http://127.0.0.1:18800/health", timeout=5)),
+        json.load(urllib.request.urlopen(adapter_url("/health"), timeout=5)),
     )
     run(
         "systemctl",
@@ -250,7 +261,7 @@ def doctor(args):
 def smoke(args):
     key = (RUNTIME / "adapter.key").read_text().strip()
     request = urllib.request.Request(
-        "http://127.0.0.1:18800/v1/chat/completions",
+        adapter_url("/v1/chat/completions"),
         data=json.dumps(
             {
                 "model": args.model,
@@ -279,6 +290,7 @@ def main():
     p = sub.add_parser("install")
     p.add_argument("--workspace", default=str(HOME / ".openclaw/workspace"))
     p.add_argument("--project", default="openclaw-project")
+    p.add_argument("--port", type=int, default=18800)
     p.add_argument("--agy", default=str(HOME / ".local/bin/agy"))
     p.add_argument(
         "--qemu", help="Absolute qemu-x86_64 path; only for incompatible old x86 CPUs"

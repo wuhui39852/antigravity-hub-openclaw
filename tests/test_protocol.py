@@ -65,6 +65,23 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bridge.Bridge().normalize(messages)
 
+    def test_extra_data_and_multiple_json_envelopes(self):
+        call_with_extra = '{"content": null, "tool_calls": [{"name": "read", "arguments": {"path": "x"}}]} Extra text line 1'
+        res = parse_tool_reply(call_with_extra, TOOLS, "auto")
+        self.assertEqual(res["tool_calls"][0]["function"]["name"], "read")
+
+        multiple_envelopes = '{"content": null, "tool_calls": [{"name": "read", "arguments": {"path": "1"}}]} {"content": "done", "tool_calls": [{"name": "read", "arguments": {"path": "2"}}]}'
+        res2 = parse_tool_reply(multiple_envelopes, TOOLS, "auto")
+        self.assertEqual(len(res2["tool_calls"]), 2)
+        self.assertEqual(res2["content"], "done")
+
+    def test_missing_closing_bracket_repaired(self):
+        missing_bracket = '{"content": null, "tool_calls": [{"name": "read", "arguments": {"path": "x"}}]}'
+        # Malformed: missing ']' before last '}'
+        malformed = '{"content": null, "tool_calls": [{"name": "read", "arguments": {"path": "x"}}}'
+        res = parse_tool_reply(malformed, TOOLS, "auto")
+        self.assertEqual(res["tool_calls"][0]["function"]["name"], "read")
+
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self):

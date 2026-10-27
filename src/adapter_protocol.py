@@ -2,6 +2,7 @@
 import json
 import re
 import uuid
+import logging
 
 
 def reject_constant(value):
@@ -184,6 +185,115 @@ def validate_request(data):
     validate_tools(data.get("tools"), data.get("tool_choice"))
 
 
+def balance_json(s):
+    """Repair minor syntax flaws in model-emitted JSON like missing ']' before '}' or unclosed braces."""
+    s = re.sub(r',\s*([\]}])', r'\1', s)
+    stack = []
+    in_string = False
+    escape = False
+    out = []
+    for char in s:
+        if escape:
+            escape = False
+            out.append(char)
+            continue
+        if char == '\\':
+            if in_string:
+                escape = True
+            out.append(char)
+            continue
+        if char == '"':
+            in_string = not in_string
+            out.append(char)
+            continue
+        if in_string:
+            out.append(char)
+            continue
+        if char in ('{', '['):
+            stack.append(char)
+            out.append(char)
+        elif char == '}':
+            while stack and stack[-1] == '[':
+                stack.pop()
+                out.append(']')
+            if stack and stack[-1] == '{':
+                stack.pop()
+            out.append(char)
+        elif char == ']':
+            while stack and stack[-1] == '{':
+                stack.pop()
+                out.append('}')
+            if stack and stack[-1] == '[':
+                stack.pop()
+            out.append(char)
+        else:
+            out.append(char)
+    while stack:
+        top = stack.pop()
+        if top == '{':
+            out.append('}')
+        elif top == '[':
+            out.append(']')
+    return ''.join(out)
+
+
+def decode_tool_envelope(text):
+    """Safely decode tool envelope(s) from text.
+    Handles single JSON envelope, multiple consecutive JSON blocks,
+    syntax slips (missing ']' or '}'), trailing code fence backticks, or trailing explanations.
+    """
+    clean_text = text.strip()
+    if clean_text.startswith("```"):
+        clean_text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", clean_text).strip()
+    clean_text = clean_text.rstrip("`").strip()
+
+    start = clean_text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in tool envelope")
+    decoder = json.JSONDecoder(parse_constant=reject_constant, strict=False)
+
+    target_text = clean_text[start:]
+    try:
+        parsed, end = decoder.raw_decode(target_text)
+    except Exception:
+        repaired = balance_json(target_text)
+        parsed, end = decoder.raw_decode(repaired)
+
+    if not isinstance(parsed, dict) or not {"content", "tool_calls"} <= parsed.keys():
+        raise ValueError("Expected content and tool_calls in JSON envelope")
+
+    all_calls = list(parsed.get("tool_calls") or [])
+    last_content = parsed.get("content")
+    idx = end + start
+    while idx < len(clean_text):
+        while idx < len(clean_text) and clean_text[idx].isspace():
+            idx += 1
+        if idx >= len(clean_text) or clean_text[idx] == "`":
+            break
+        try:
+            extra, next_idx = decoder.raw_decode(clean_text, idx)
+            idx = next_idx
+        except Exception:
+            try:
+                repaired_chunk = balance_json(clean_text[idx:])
+                extra, _ = decoder.raw_decode(repaired_chunk)
+                idx = len(clean_text)
+            except Exception:
+                break
+        if isinstance(extra, dict):
+            if "tool_calls" in extra and isinstance(extra["tool_calls"], list):
+                for call in extra["tool_calls"]:
+                    if call not in all_calls:
+                        all_calls.append(call)
+            if extra.get("content"):
+                last_content = extra["content"]
+
+    parsed["tool_calls"] = all_calls
+    if last_content is not None:
+        parsed["content"] = last_content
+    return parsed
+
+
 def parse_tool_reply(answer, tools, choice):
     text = answer.strip()
     if not text.startswith(("{", "[", "```")):
@@ -193,7 +303,7 @@ def parse_tool_reply(answer, tools, choice):
     if text.startswith("```"):
         text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text).strip()
     try:
-        parsed = json.loads(text, parse_constant=reject_constant)
+        parsed = decode_tool_envelope(text)
         if not isinstance(parsed, dict) or not {"content", "tool_calls"} <= parsed.keys():
             raise ValueError("Expected content and tool_calls")
         if parsed["content"] is not None and not isinstance(parsed["content"], str):

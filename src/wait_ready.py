@@ -1,10 +1,10 @@
-import time, urllib.request, json
+import time, urllib.request, json, os
 
 deadline = time.monotonic() + 60
 while time.monotonic() < deadline:
     try:
         with urllib.request.urlopen(
-            "http://127.0.0.1:18800/health", timeout=3
+            "http://127.0.0.1:" + os.environ.get("ADAPTER_PORT", "18800") + "/health", timeout=3
         ) as response:
             if json.load(response).get("ok"):
                 raise SystemExit(0)

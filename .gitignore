@@ -9,6 +9,7 @@ adapter-settings.json
 openclaw.json*
 *.log
 *.zip
+quota.json
 .env
 .env.*
 !.env.example

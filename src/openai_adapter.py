@@ -41,13 +41,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path == "/health":
+                from quota_exporter import update_quota_file
+                update_quota_file()
                 models = bridge.models()
                 return self.send_json(
                     200, {"ok": True, "hubPid": discover()[2], "models": len(models)}
                 )
+            if self.path == "/v1/quota":
+                from quota_exporter import update_quota_file
+                q = update_quota_file()
+                return self.send_json(200, q or {})
             if not self.authorized():
                 return self.send_json(401, {"error": {"message": "Unauthorized"}})
             if self.path == "/v1/models":
+                from quota_exporter import update_quota_file
+                update_quota_file()
                 return self.send_json(
                     200,
                     {
@@ -178,6 +186,18 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+    import threading
+    from quota_exporter import update_quota_file
+
+    def quota_loop():
+        while True:
+            try:
+                update_quota_file()
+            except Exception as e:
+                logging.debug("Quota refresh: %s", e)
+            time.sleep(30)
+
+    threading.Thread(target=quota_loop, daemon=True, name="quota_refresher").start()
     srv = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("ADAPTER_PORT", "18800"))), Handler)
     srv.daemon_threads = True
     srv.serve_forever()
