@@ -21,6 +21,8 @@ flowchart LR
 ## 功能与边界
 
 - `/v1/models`：实时读取当前账号启用的模型。
+- `/v1/usage`：凭适配器密钥读取 Hub 当前模型配额百分比与重置时间。
+- `/v1/quota`：凭适配器密钥读取 Hub 明确提供的 5 小时／周额度；不返回账号邮箱。
 - `/v1/chat/completions`：文本对话、JSON 工具请求转换、会话复用、OpenAI SSE 封装。
 - 原生终端／网页／MCP 等操作由 Hub 项目权限控制；实际能力还取决于本机工具和 MCP 服务是否已安装。
 - 生成图片、附件及引用的本地文件会归档到 OpenClaw 媒体目录，作为 `MEDIA:` 输出交给聊天通道发送。
@@ -134,6 +136,26 @@ qemu-x86_64 -cpu max ~/.local/bin/agy
 ```
 
 再执行上面的 `init-auth`、`setup-project`、`smoke-test`。模拟运行有性能和稳定性成本，不保证适用于所有老 CPU。不要在支持原生运行的 ARM64 设备上使用 x86 QEMU 参数。
+
+## Telegram `/status` 显示 Antigravity 配额
+
+`openclaw-status-plugin/` 是本项目附带的 OpenClaw 插件。它只在配置的 Telegram 私聊会话中，为原生 `/status` 回复追加指定模型的 Hub 配额；当前会话使用 GPT‑6.1 Sol 时也能查看。配额在 `/status` 请求时读取，adapter 另每 30 秒刷新本地快照，不会主动向聊天推送。查询失败会标注“暂不可用”，不影响原有状态内容。
+
+Hub `RetrieveUserQuotaSummary` 可用时，插件显示 Hub 明确标注的 5 小时／周额度。若该查询不可用，回退到 `GetUserStatus` 的单个剩余比例与重置时间，并明确标注“独立周额度：Hub 未提供”；不会推测额度窗口或混用 OpenAI 额度。
+
+插件安装后在 `plugins.entries.antigravity-hub-status.config` 设置：
+
+```json
+{
+  "sessionKeys": ["agent:main:telegram:<account>:direct:<chat-id>"],
+  "adapterUrl": "http://127.0.0.1:18801",
+  "keyFile": "/absolute/path/to/antigravity-hub-adapter/adapter.key",
+  "model": "gemini-3.8-flash-low",
+  "timeZone": "Asia/Shanghai"
+}
+```
+
+`sessionKeys` 必须明确指定，避免将账号配额发到其他聊天。插件入口见 [openclaw-status-plugin](openclaw-status-plugin/)；安装／启用和重启 Gateway 应按当前 OpenClaw 版本的插件命令执行。
 
 ## 输出图片和附件
 

@@ -86,6 +86,29 @@ class Bridge:
             if m.get("modelId") and not m.get("disabled")
         ]
 
+    def usage(self):
+        """Return only quota facts exposed by Hub; never infer missing windows."""
+        u = rpc("GetUserStatus").get("userStatus", {})
+        if not u.get("email"):
+            raise AdapterError("Hub is not logged in", "hub_auth_error", 503)
+        models = []
+        for model in u.get("cascadeModelConfigData", {}).get("clientModelConfigs", []):
+            model_id = model.get("modelId")
+            if not model_id or model.get("disabled"):
+                continue
+            quota = model.get("quotaInfo") or {}
+            fraction = quota.get("remainingFraction")
+            if isinstance(fraction, bool) or not isinstance(fraction, (float, int)) or not 0 <= fraction <= 1:
+                continue
+            models.append({
+                "model": model_id,
+                "remainingPercent": round(fraction * 100, 2),
+                "usedPercent": round((1 - fraction) * 100, 2),
+                "resetTime": quota.get("resetTime"),
+                "window": "unspecified",
+            })
+        return {"plan": u.get("userTier", {}).get("name"), "models": models}
+
     def normalize(self, messages):
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a nonempty array")

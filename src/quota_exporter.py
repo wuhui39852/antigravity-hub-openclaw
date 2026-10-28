@@ -1,4 +1,4 @@
-import sys, json, time, datetime, logging
+import sys, json, time, datetime, logging, os
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -68,12 +68,12 @@ def update_quota_file():
                 "groups": structured_groups
             }
             QUOTA_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+            os.chmod(QUOTA_FILE, 0o600)
             return payload
 
         # 2. Fallback to GetUserStatus
         u = rpc("GetUserStatus").get("userStatus", {})
         tier_name = u.get("userTier", {}).get("name") or "Google AI Pro"
-        email = u.get("email") or ""
         configs = u.get("cascadeModelConfigData", {}).get("clientModelConfigs", [])
         
         seen_quotas = {}
@@ -112,11 +112,11 @@ def update_quota_file():
         payload = {
             "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "tier": tier_name,
-            "email": email,
             "formattedLine": formatted_line,
             "models": list(seen_quotas.values())
         }
         QUOTA_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        os.chmod(QUOTA_FILE, 0o600)
         return payload
     except Exception as e:
         logging.warning("Failed to update quota file: %s", e)

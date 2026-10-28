@@ -265,6 +265,34 @@ class HTTPTests(unittest.TestCase):
             with urllib.request.urlopen(r) as response:
                 self.assertEqual(json.load(response)["data"][0]["id"], "test")
 
+    def test_usage_is_authenticated_and_does_not_expose_account(self):
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(self.url + "/v1/usage")
+        self.assertEqual(error.exception.code, 401)
+        error.exception.close()
+        hub_status = {"userStatus": {
+            "email": "private@example.invalid", "userTier": {"name": "Pro"},
+            "cascadeModelConfigData": {"clientModelConfigs": [
+                {"modelId": "gemini-3.8-flash-low", "quotaInfo": {
+                    "remainingFraction": 0.88566554, "resetTime": "2026-10-27T05:02:14Z"}},
+                {"modelId": "disabled", "disabled": True, "quotaInfo": {"remainingFraction": 0.4}},
+            ]},
+        }}
+        with patch.object(bridge, "rpc", return_value=hub_status):
+            request = urllib.request.Request(
+                self.url + "/v1/usage",
+                headers={"Authorization": "Bearer unit-test-key"},
+            )
+            with urllib.request.urlopen(request) as response:
+                data = json.load(response)
+        self.assertEqual(data["models"], [{
+            "model": "gemini-3.8-flash-low", "remainingPercent": 88.57,
+            "usedPercent": 11.43, "resetTime": "2026-10-27T05:02:14Z",
+            "window": "unspecified",
+        }])
+        self.assertEqual(data["plan"], "Pro")
+        self.assertNotIn("private@example.invalid", json.dumps(data))
+
     def post_error(self, data):
         request = urllib.request.Request(
             self.url + "/v1/chat/completions", data=json.dumps(data).encode(),

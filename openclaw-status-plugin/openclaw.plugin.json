@@ -1,0 +1,18 @@
+{
+  "id": "antigravity-hub-status",
+  "name": "Antigravity Hub Status",
+  "description": "Appends authenticated Antigravity Hub quota to selected Telegram /status replies",
+  "categories": ["models"],
+  "activation": {"onStartup": true},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sessionKeys": {"type": "array", "items": {"type": "string"}},
+      "adapterUrl": {"type": "string"},
+      "keyFile": {"type": "string"},
+      "model": {"type": "string"},
+      "timeZone": {"type": "string"}
+    }
+  }
+}

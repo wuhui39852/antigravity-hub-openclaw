@@ -47,12 +47,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(
                     200, {"ok": True, "hubPid": discover()[2], "models": len(models)}
                 )
+            if not self.authorized():
+                return self.send_json(401, {"error": {"message": "Unauthorized"}})
             if self.path == "/v1/quota":
                 from quota_exporter import update_quota_file
                 q = update_quota_file()
                 return self.send_json(200, q or {})
-            if not self.authorized():
-                return self.send_json(401, {"error": {"message": "Unauthorized"}})
             if self.path == "/v1/models":
                 from quota_exporter import update_quota_file
                 update_quota_file()
@@ -70,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
                         ],
                     },
                 )
+            if self.path == "/v1/usage":
+                return self.send_json(200, bridge.usage())
             self.send_json(404, {"error": {"message": "Not found"}})
         except Exception as e:
             self.send_error_json(e)

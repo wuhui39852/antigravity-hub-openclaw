@@ -26,6 +26,8 @@ Linux 的 `start_hub.py` 选择空闲本机端口和随机 CSRF，启动原版 `
 
 请求字段错误返回 400／`invalid_request_error`；锁繁忙返回 503／`adapter_busy` 并带 `Retry-After: 1`；Hub HTTP 429 或轨迹中的额度耗尽错误返回 429／`rate_limited`，不猜测恢复时间；Hub 未登录、权限失败或不可连接返回 503。上游原始 HTTP 错误正文不直接暴露给调用方。SSE 已建立后出现的错误只能作为流内文本发送，不能改写 HTTP 状态。日志包含请求 ID、模型、总耗时和会话复用信息。尚未实现自动重试、实时增量流及断连即时取消。
 
+`/v1/usage` 与 `/v1/quota` 均需要 Bearer 密钥。前者从 Hub `GetUserStatus` 提取剩余与已用百分比、重置时间和计划名；后者优先使用 `RetrieveUserQuotaSummary` 提供的明确额度窗口，缺少时回退为未注明窗口的数据。接口与缓存均不输出账号邮箱。可选 OpenClaw 插件只改写明确允许的 Telegram 会话中的 `/status` 出站文本，不更改 OpenClaw 核心。
+
 ## 本机文件
 
 ```text
