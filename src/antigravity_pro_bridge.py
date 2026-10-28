@@ -1,4 +1,4 @@
-import json, urllib.request, urllib.error, os, socket, re, subprocess, sys
+import json, urllib.request, urllib.error, urllib.parse, os, socket, re, subprocess, sys, base64
 from adapter_protocol import AdapterError, validate_tools, parse_tool_reply
 from pathlib import Path
 
@@ -96,16 +96,60 @@ class Bridge:
             c = m.get("content", "")
             if c is not None and not isinstance(c, (str, list)):
                 raise ValueError("message content must be text or text blocks")
+            media_list = []
             if isinstance(c, list):
-                if any(not isinstance(x, dict) or not isinstance(x.get("text"), str) for x in c):
-                    raise ValueError("Only text content blocks with string text are supported")
-                if any(
-                    x.get("type") not in ["text", "input_text", "output_text"]
-                    for x in c
-                    if isinstance(x, dict)
-                ):
-                    raise ValueError("Only text content is currently supported")
-                c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+                text_parts = []
+                for x in c:
+                    if not isinstance(x, dict):
+                        raise ValueError("Content blocks must be objects")
+                    btype = x.get("type")
+                    if btype in ["text", "input_text", "output_text"]:
+                        t = x.get("text")
+                        if not isinstance(t, str):
+                            raise ValueError("Text content blocks must have string text")
+                        text_parts.append(t)
+                    elif btype in ["image_url", "image", "input_image"]:
+                        img_b64 = None
+                        mime_type = "image/jpeg"
+                        if btype == "image_url":
+                            iu = x.get("image_url")
+                            url = iu.get("url") if isinstance(iu, dict) else (iu if isinstance(iu, str) else "")
+                            if not isinstance(url, str) or not url:
+                                raise ValueError("image_url must contain a valid url string")
+                            if url.startswith("data:"):
+                                header, _, b64 = url.partition(",")
+                                img_b64 = b64.strip()
+                                if ";" in header:
+                                    mime_type = header[5:].split(";")[0] or "image/jpeg"
+                            elif url.startswith("file://") or (len(url) < 1024 and os.path.exists(url)):
+                                fpath = urllib.parse.unquote(url[7:]) if url.startswith("file://") else url
+                                if os.path.isfile(fpath):
+                                    with open(fpath, "rb") as f:
+                                        img_b64 = base64.b64encode(f.read()).decode("ascii")
+                                    ext = Path(fpath).suffix.lower()
+                                    mime_type = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
+                                else:
+                                    raise ValueError(f"File not found: {fpath}")
+                            else:
+                                raise ValueError("Only data URIs and local file URLs are supported for image_url")
+                        elif btype in ["image", "input_image"]:
+                            data = x.get("data") or x.get("image")
+                            if not isinstance(data, str) or not data:
+                                raise ValueError("image block must contain base64 data string")
+                            img_b64 = data.strip()
+                            mime_type = x.get("mimeType") or x.get("mime_type") or "image/jpeg"
+
+                        ext = "png" if "png" in mime_type else ("webp" if "webp" in mime_type else "jpg")
+                        display_name = f"image_{len(media_list) + 1}.{ext}"
+                        media_list.append({
+                            "mimeType": mime_type,
+                            "inlineData": img_b64,
+                            "displayName": display_name
+                        })
+                        text_parts.append(f"[Attached Image: {display_name}]")
+                    else:
+                        raise ValueError(f"Only text and image content blocks are supported, got: {btype}")
+                c = "\n".join(text_parts)
             if m["role"] == "tool" and (not isinstance(m.get("tool_call_id"), str) or not m["tool_call_id"]):
                 raise ValueError("tool messages need a tool_call_id")
             if "tool_calls" in m:
@@ -125,6 +169,8 @@ class Bridge:
                     if not isinstance(args, dict):
                         raise ValueError("Assistant tool arguments must encode an object")
             e = {"role": m.get("role"), "content": c or ""}
+            if media_list:
+                e["media"] = media_list
             for k in ["tool_calls", "tool_call_id", "name"]:
                 if k in m:
                     e[k] = m[k]
@@ -201,11 +247,18 @@ class Bridge:
                     "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": 0}
                 ).get("steps", [])
             )
+            all_media = []
+            for m in messages:
+                if "media" in m:
+                    all_media.extend(m["media"])
+
             instruction = (
                 "Respond to the supplied conversation. The messages retain their stated system/user/assistant/tool roles. Native Hub tools are available under this project permission policy. Work within the configured project tree: "
                 + settings()["workspace"]
                 + ". Do not read credential stores or system configuration unless the user task explicitly requires them. Prefer the caller-provided tools when they cover the task; use native tools for image generation and other capabilities absent from the caller. If you create requested deliverables, include their absolute file paths as MEDIA:path lines in your final answer.\n"
             )
+            if all_media:
+                instruction += "Image media is attached to this request. Analyze and incorporate the visual contents into your reply as requested.\n"
             if tools:
                 instruction += (
                     "If a supplied tool is needed, return ONLY a JSON object with content (string or null) and tool_calls: [{name: exact tool name, arguments: JSON object}]. The listed caller tools are executed by the caller; native Hub capabilities are separate. Otherwise return ONLY a JSON object {content: your answer, tool_calls: []}. The caller executes tool calls and supplies their results.\nAVAILABLE_TOOLS="
@@ -229,23 +282,23 @@ class Bridge:
                 return send_call(method, data, timeout=min(30, remaining))
             call = timed_call
             submitted = True
-            call(
-                "SendUserCascadeMessage",
-                {
-                    "cascadeId": cid,
-                    "items": [{"text": instruction}],
-                    "cascadeConfig": {
-                        "plannerConfig": {
-                            "requestedModel": models[model]["modelOrAlias"],
-                            "toolConfig": {
-                                "forceDisableToolCalling": not settings().get(
-                                    "nativeTools", False
-                                )
-                            },
-                        }
-                    },
+            send_payload = {
+                "cascadeId": cid,
+                "items": [{"text": instruction}],
+                "cascadeConfig": {
+                    "plannerConfig": {
+                        "requestedModel": models[model]["modelOrAlias"],
+                        "toolConfig": {
+                            "forceDisableToolCalling": not settings().get(
+                                "nativeTools", False
+                            )
+                        },
+                    }
                 },
-            )
+            }
+            if all_media:
+                send_payload["media"] = all_media
+            call("SendUserCascadeMessage", send_payload)
             answer = ""
             all_steps = []
             idle_without_answer_at = None

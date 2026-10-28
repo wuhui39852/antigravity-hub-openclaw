@@ -202,11 +202,27 @@ class BridgeTests(unittest.TestCase):
                 tools,
             )
 
-    def test_non_text_input_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Only text"):
+    def test_unsupported_content_type_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Only text and image"):
             bridge.Bridge().normalize(
-                [{"role": "user", "content": [{"type": "image_url"}]}]
+                [{"role": "user", "content": [{"type": "video_url"}]}]
             )
+
+    def test_image_input_accepted(self):
+        norm = bridge.Bridge().normalize(
+            [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this:"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+                ]
+            }]
+        )
+        self.assertEqual(len(norm), 1)
+        self.assertIn("[Attached Image: image_1.png]", norm[0]["content"])
+        self.assertEqual(len(norm[0]["media"]), 1)
+        self.assertEqual(norm[0]["media"][0]["mimeType"], "image/png")
+        self.assertEqual(norm[0]["media"][0]["inlineData"], "iVBORw0KGgo=")
 
 
 class HTTPTests(unittest.TestCase):
